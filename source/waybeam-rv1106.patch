@@ -1,0 +1,1491 @@
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/Makefile wv2/waybeam_venc-master/Makefile
+--- orig/waybeam_venc-master/Makefile	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/Makefile	2026-11-04 10:07:49.646076399 +0000
+@@ -30,6 +30,14 @@
+ STAR6E_CC ?= $(TOOLCHAIN_DIR)/bin/arm-openipc-linux-gnueabihf-gcc
+ MARUKO_CC ?= $(TOOLCHAIN_MARUKO_DIR)/bin/arm-openipc-linux-musleabihf-gcc
+ 
++# RV1106 (Luckfox Pico Ultra) builds against the Luckfox SDK tree:
++#   RV1106_SDK=/path/to/luckfox-pico   (git clone LuckfoxTECH/luckfox-pico)
++RV1106_SDK ?= ../luckfox-pico
++RV1106_CC ?= $(RV1106_SDK)/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc
++RV1106_MPI := $(RV1106_SDK)/media/rockit/rockit/mpi/sdk/include
++RV1106_AIQ := $(RV1106_SDK)/media/isp/release_camera_engine_rkaiq_rv1106_arm-rockchip830-linux-uclibcgnueabihf
++RV1106_ROCKIT_LIB := $(RV1106_SDK)/media/rockit/rockit/lib/lib32
++
+ # Hi3516CV610 uses the public OpenHisilicon V5 headers and OpenIPC's ARMv7
+ # musl sysroot.  These trees are intentionally external: the vendor SDK
+ # libraries are not redistributed by this repository.
+@@ -180,14 +188,39 @@
+ BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
+ BUILD_TESTS := 0
+ TOOLCHAIN_TARGET := cv610-sdk
++else ifeq ($(SOC_BUILD),rv1106)
++CC := $(RV1106_CC)
++SRC := src/main.c src/backend_rv1106.c src/rv1106_runtime.c src/rv1106_jpeg.c src/backend.c \
++	src/venc_config.c src/venc_httpd.c src/venc_api.c src/venc_webui.c \
++	src/venc_jpeg.c src/venc_rec_writer.c $(RECORDER_SRC) \
++	src/venc_recordings.c src/codec_config.c src/pipeline_common.c \
++	src/file_util.c src/idr_rate_limit.c src/timing.c src/intra_refresh.c src/frame_gate.c \
++	src/framing_kalman.c src/attitude_est.c lib/cJSON.c \
++	src/h26x_util.c src/h26x_param_sets.c src/rtp_packetizer.c \
++	src/hevc_rtp.c src/rtp_session.c src/rtp_sidecar.c src/output_socket.c \
++	src/venc_frame_ring.c src/mdns_wire.c src/mdns_beacon.c \
++	src/device_id.c src/venc_respawn.c
++DRV :=
++DRV_EXTRA :=
++SOC_CFLAGS := -mfpu=neon-vfpv4 -mfloat-abi=hard -I$(RV1106_MPI) \
++	-I$(RV1106_AIQ)/include/rkaiq -I$(RV1106_AIQ)/include/rkaiq/uAPI2 \
++	-I$(RV1106_AIQ)/include/rkaiq/common -I$(RV1106_AIQ)/include/rkaiq/algos \
++	-I$(RV1106_AIQ)/include/rkaiq/xcore -I$(RV1106_AIQ)/include/rkaiq/iq_parser \
++	-I$(RV1106_AIQ)/include/rkaiq/iq_parser_v2 -DISP_HW_V30
++SOC_DEFS := -DPLATFORM_RV1106 -DHAVE_BACKEND_RV1106=1
++SOC_LDFLAGS := -Wl,--allow-shlib-undefined -L$(RV1106_ROCKIT_LIB) -L$(RV1106_AIQ)/lib
++SOC_LIBS := -lrockit -lrkaiq -lm
++BASE_LIBS := -Wl,--start-group -lpthread -ldl -lrt -Wl,--end-group
++BUILD_TESTS := 0
++TOOLCHAIN_TARGET := rv1106-sdk
+ else
+-$(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e', 'maruko', or 'cv610')
++$(error Unsupported SOC_BUILD '$(SOC_BUILD)'; expected 'star6e', 'maruko', 'cv610', or 'rv1106')
+ endif
+ 
+ CFLAGS += $(COMMON_CFLAGS) $(SOC_CFLAGS) $(SOC_DEFS)
+ LDFLAGS += $(COMMON_LDFLAGS) $(SOC_LDFLAGS)
+ 
+-.PHONY: help all build lint stage clean toolchain toolchain-maruko toolchain-cv610 cv610-sdk sensor-cv610 ksrc-maruko \
++.PHONY: help all build lint stage clean toolchain toolchain-maruko toolchain-cv610 cv610-sdk rv1106-sdk sensor-cv610 ksrc-maruko \
+         drivers-maruko ksrc-star6e drivers-star6e maruko-pull maruko-deploy maruko-full json_cli regscan \
+         remote-test verify pre-pr \
+         check check-soc-stamp print-config test test-werror test-asan test-tsan test-ci \
+@@ -604,6 +637,9 @@
+ 		rm -f "$(TOOLCHAIN_CV610_TGZ)"; \
+ 	fi
+ 
++rv1106-sdk:
++	@test -x "$(RV1106_CC)" || { echo "ERROR: RV1106 toolchain not found at $(RV1106_CC)" >&2; echo "       git clone https://github.com/LuckfoxTECH/luckfox-pico and pass RV1106_SDK=<path>" >&2; exit 1; }
++
+ cv610-sdk: toolchain-cv610
+ 	@command -v "$(CV610_CC)" >/dev/null 2>&1 || { \
+ 		echo "ERROR: CV610 compiler not found: $(CV610_CC)" >&2; \
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/config/waybeam.default.rv1106.json wv2/waybeam_venc-master/config/waybeam.default.rv1106.json
+--- orig/waybeam_venc-master/config/waybeam.default.rv1106.json	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/config/waybeam.default.rv1106.json	2026-11-04 14:54:14.003788315 +0000
+@@ -0,0 +1,18 @@
++{
++  "system": { "verbose": false, "webPort": 80 },
++  "image": { "mirror": false, "flip": false },
++  "video0": {
++    "rcMode": "cbr",
++    "fps": 25,
++    "size": "2592x1944",
++    "bitrate": 6000,
++    "gopSize": 1.0
++  },
++  "outgoing": {
++    "enabled": true,
++    "server": "udp://192.168.1.100:5600",
++    "maxPayloadSize": 1400,
++    "connectedUdp": true
++  },
++  "snapshot": { "enabled": true, "quality": 70 }
++}
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/documentation/RV1106.md wv2/waybeam_venc-master/documentation/RV1106.md
+--- orig/waybeam_venc-master/documentation/RV1106.md	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/documentation/RV1106.md	2026-11-04 14:54:30.917950860 +0000
+@@ -0,0 +1,49 @@
++# RV1106 backend (Luckfox Pico Ultra + MIS5001)
++
++Pipeline: MIS5001 (MIPI) -> RKAIQ ISP -> VI chn0 -> `RK_MPI_SYS_Bind` -> VENC
++(H.265) -> RTP/UDP.  A second small ISP output (VI chn1) feeds a JPEG VENC
++channel used by the web dashboard's **Live** tab.  The shared HTTP API and
++dashboard run unchanged on top (`venc_api.c` has an `rv1106` field whitelist).
++
++Files: `src/rv1106_runtime.c`, `src/rv1106_jpeg.c`, `src/backend_rv1106.c`,
++`include/rv1106_runtime.h`.
++
++## Build
++
++```sh
++git clone --depth 1 https://github.com/LuckfoxTECH/luckfox-pico ../luckfox-pico
++make build SOC_BUILD=rv1106 RV1106_SDK=../luckfox-pico
++# -> out/rv1106/waybeam (ARM uclibc; needs librockit.so + librkaiq.so on target)
++```
++
++## Run
++
++```sh
++scp out/rv1106/waybeam root@<board>:/usr/bin/
++scp config/waybeam.default.rv1106.json root@<board>:/etc/waybeam.json   # edit outgoing.server
++ssh root@<board> 'WAYBEAM_IQ_DIR=/etc/iqfiles waybeam'
++```
++
++Open `http://<board-ip>/` (port = `system.webPort`, default 80).  The **Live**
++tab polls `/api/v1/snapshot.jpg` (640px wide JPEG, 2/5/10 fps) — it uses a
++separate encoder channel, so it costs the video link nothing while closed.
++
++Receiver check: `gst-launch-1.0 udpsrc port=5600 caps="application/x-rtp,encoding-name=H265,payload=97" ! rtph265depay ! h265parse ! avdec_h265 ! autovideosink`
++
++## Settings
++
++| Applied live | Needs restart (auto cold-restart from the UI) |
++|---|---|
++| video0.bitrate, video0.gopSize, outgoing.enabled/server/maxPayloadSize, system.verbose, snapshot.quality, force IDR | video0.size/fps/rcMode, image.mirror/flip, snapshot.enabled, system.webPort, discovery.* |
++
++Anything else is shown greyed out (not implemented on this backend).
++
++## Limits
++
++- **FPS:** the stock `mis5001.c` kernel driver has ONE mode, 2592x1944 @ 25 fps.
++  `video0.fps` > 25 does not make the sensor faster.  60 fps needs a new
++  sensor mode (register table + hts/vts) in the kernel driver, plus an IQ json.
++- No ISP/IQ tuning tab, audio, recording or stabilization (routes answer 501 / are hidden).
++- Untested on hardware: compiled and linked against the Luckfox SDK only.
++  If a main size smaller than 2592x1944 fails at VI_SetChnAttr, use the
++  sensor size first and tell me the exact error.
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/include/rv1106_runtime.h wv2/waybeam_venc-master/include/rv1106_runtime.h
+--- orig/waybeam_venc-master/include/rv1106_runtime.h	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/include/rv1106_runtime.h	2026-11-04 10:07:31.831937077 +0000
+@@ -0,0 +1,10 @@
++#ifndef RV1106_RUNTIME_H
++#define RV1106_RUNTIME_H
++
++#include "backend.h"
++
++/** Rockchip RV1106 backend (Luckfox Pico Ultra): RKAIQ ISP -> VI -> VENC
++ *  (H.265) -> RTP/UDP.  Built with `make build SOC_BUILD=rv1106`. */
++const BackendOps *rv1106_runtime_backend_ops(void);
++
++#endif /* RV1106_RUNTIME_H */
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/include/star6e_recorder.h wv2/waybeam_venc-master/include/star6e_recorder.h
+--- orig/waybeam_venc-master/include/star6e_recorder.h	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/include/star6e_recorder.h	2026-11-04 10:08:27.271125836 +0000
+@@ -234,7 +234,7 @@
+ int star6e_recorder_write_au(Star6eRecorderState *state,
+ 	const uint8_t *au, size_t len, int is_idr);
+ 
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ /** Write one encoded frame (all NAL units) to the recording file.
+  *  No-op if not currently recording.  Returns bytes written, 0 if not
+  *  active, or -1 on error.  Automatically stops recording on disk full
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/include/star6e_ts_recorder.h wv2/waybeam_venc-master/include/star6e_ts_recorder.h
+--- orig/waybeam_venc-master/include/star6e_ts_recorder.h	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/include/star6e_ts_recorder.h	2026-11-04 10:08:27.271539114 +0000
+@@ -146,7 +146,7 @@
+ 	uint32_t *segments, const char **path,
+ 	Star6eRecorderStopReason *last_stop_reason);
+ 
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ /** Convenience: extract NAL data from MI_VENC_Stream_t and write as TS.
+  *  Handles IDR detection and PTS from CLOCK_MONOTONIC.
+  *  No-op if not active.
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/init.d/S95waybeam.rv1106 wv2/waybeam_venc-master/init.d/S95waybeam.rv1106
+--- orig/waybeam_venc-master/init.d/S95waybeam.rv1106	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/init.d/S95waybeam.rv1106	2026-11-04 10:07:32.010643827 +0000
+@@ -0,0 +1,16 @@
++#!/bin/sh
++# Luckfox Pico Ultra (RV1106) launcher.  Assumes the mis5001 driver is built
++# into / loaded by the kernel and /etc/iqfiles holds the sensor's IQ json.
++DAEMON=/usr/bin/waybeam
++export WAYBEAM_IQ_DIR=/etc/iqfiles
++
++case "$1" in
++start)
++	start-stop-daemon -S -b -m -p /var/run/waybeam.pid -x $DAEMON ;;
++stop)
++	start-stop-daemon -K -p /var/run/waybeam.pid ;;
++restart)
++	$0 stop; sleep 1; $0 start ;;
++*)
++	echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
++esac
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/backend_rv1106.c wv2/waybeam_venc-master/src/backend_rv1106.c
+--- orig/waybeam_venc-master/src/backend_rv1106.c	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/src/backend_rv1106.c	2026-11-04 10:07:31.836236079 +0000
+@@ -0,0 +1,7 @@
++#include "backend.h"
++#include "rv1106_runtime.h"
++
++const BackendOps *backend_get_selected(void)
++{
++	return rv1106_runtime_backend_ops();
++}
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/device_id.c wv2/waybeam_venc-master/src/device_id.c
+--- orig/waybeam_venc-master/src/device_id.c	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/src/device_id.c	2026-11-04 10:08:38.516672502 +0000
+@@ -24,7 +24,7 @@
+ #include <sys/mman.h>
+ #include <unistd.h>
+ 
+-#ifndef PLATFORM_CV610
++#if !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ #define SSTAR_GEN_REG    0x1F003C00u  /* low16 = chip generation tag        */
+ #define DIEID_BASE_6E    0x1F203150u  /* INFINITY6E (ssc338q) die-ID base   */
+ #define DIEID_BASE_ALT   0x1F004058u  /* other SigmaStar generations        */
+@@ -57,7 +57,7 @@
+ 	if (!out || len < 13)
+ 		return false;
+ 
+-#ifdef PLATFORM_CV610
++#if defined(PLATFORM_CV610) || defined(PLATFORM_RV1106)
+ 	/* SigmaStar RIU addresses are unsafe on HiSilicon.  CV610 identity will
+ 	 * be added through an OTP-backed provider once its public register/API is
+ 	 * confirmed; mDNS falls back to the configured/host name meanwhile. */
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/rv1106_jpeg.c wv2/waybeam_venc-master/src/rv1106_jpeg.c
+--- orig/waybeam_venc-master/src/rv1106_jpeg.c	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/src/rv1106_jpeg.c	2026-11-05 04:22:42.986947116 +0000
+@@ -0,0 +1,182 @@
++/* rv1106_jpeg.c — RV1106 JPEG snapshot backend (dashboard live view).
++ *
++ * A second, small ISP output (VI pipe 0, chn 1) is read by user-space
++ * (u32Depth=1) and fed to a JPEG VENC channel with SendFrame — no SYS_Bind,
++ * which the RV1106 media stack rejects for a not-yet-started JPEG channel.
++ * Each capture does VI_GetChnFrame -> VENC_SendFrame -> GetStream -> copy ->
++ * ReleaseStream -> VI_ReleaseChnFrame, so the encoder only works while
++ * somebody is asking and the main H.265 path is untouched in between.  The preview size comes from VencJpegConfig
++ * width/height (the runtime derives it from the main stream's aspect). */
++
++#include "venc_jpeg.h"
++
++#include "rk_debug.h"
++#include "rk_defines.h"
++#include "rk_mpi_mb.h"
++#include "rk_mpi_sys.h"
++#include "rk_mpi_venc.h"
++#include "rk_mpi_vi.h"
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define RV_VI_PIPE 0
++#define RV_VI_CHN 1
++#define RV_JPEG_VENC_CHN 1
++
++static int g_vi_up, g_venc_up, g_ready;
++static uint32_t g_quality = 70;
++
++int venc_jpeg_backend_init(const VencJpegConfig *cfg)
++{
++	VI_CHN_ATTR_S vi;
++	VENC_CHN_ATTR_S a;
++	VENC_JPEG_PARAM_S jp;
++	VENC_RECV_PIC_PARAM_S recv;
++	uint32_t w, h;
++	RK_S32 ret;
++
++	if (!cfg || !cfg->enabled)
++		return -ENOENT;
++	w = cfg->width ? cfg->width : 640;
++	h = cfg->height ? cfg->height : 480;
++	if (cfg->quality)
++		g_quality = cfg->quality > 99 ? 99 : cfg->quality;
++
++	memset(&vi, 0, sizeof(vi));
++	vi.stIspOpt.u32BufCount = 2;
++	vi.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
++	vi.stSize.u32Width = w;
++	vi.stSize.u32Height = h;
++	vi.enPixelFormat = RK_FMT_YUV420SP;
++	vi.enCompressMode = COMPRESS_MODE_NONE;
++	vi.u32Depth = 1; /* user-space reads this channel */
++	ret = RK_MPI_VI_SetChnAttr(RV_VI_PIPE, RV_VI_CHN, &vi);
++	if (ret == RK_SUCCESS)
++		ret = RK_MPI_VI_EnableChn(RV_VI_PIPE, RV_VI_CHN);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "[jpeg-rv1106] VI chn%d %ux%u failed %#x\n",
++			RV_VI_CHN, w, h, ret);
++		return -EIO;
++	}
++	g_vi_up = 1;
++
++	memset(&a, 0, sizeof(a));
++	a.stVencAttr.enType = RK_VIDEO_ID_JPEG;
++	a.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
++	a.stVencAttr.u32PicWidth = w;
++	a.stVencAttr.u32PicHeight = h;
++	a.stVencAttr.u32VirWidth = w;
++	a.stVencAttr.u32VirHeight = h;
++	a.stVencAttr.u32StreamBufCnt = 2;
++	a.stVencAttr.u32BufSize = w * h;
++	a.stVencAttr.stAttrJpege.bSupportDCF = RK_FALSE;
++	a.stVencAttr.stAttrJpege.stMPFCfg.u8LargeThumbNailNum = 0;
++	a.stVencAttr.stAttrJpege.enReceiveMode = VENC_PIC_RECEIVE_SINGLE;
++	ret = RK_MPI_VENC_CreateChn(RV_JPEG_VENC_CHN, &a);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "[jpeg-rv1106] VENC_CreateChn %#x\n", ret);
++		venc_jpeg_backend_shutdown();
++		return -EIO;
++	}
++	g_venc_up = 1;
++
++	memset(&jp, 0, sizeof(jp));
++	jp.u32Qfactor = g_quality;
++	(void)RK_MPI_VENC_SetJpegParam(RV_JPEG_VENC_CHN, &jp);
++
++	memset(&recv, 0, sizeof(recv));
++	recv.s32RecvPicNum = -1;
++	ret = RK_MPI_VENC_StartRecvFrame(RV_JPEG_VENC_CHN, &recv);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "[jpeg-rv1106] StartRecvFrame %#x\n", ret);
++		venc_jpeg_backend_shutdown();
++		return -EIO;
++	}
++	g_ready = 1;
++	printf("> Snapshot: %ux%u JPEG q%u on VI chn%d\n", w, h, g_quality,
++		RV_VI_CHN);
++	return 0;
++}
++
++int venc_jpeg_backend_capture(uint8_t **out_buf, size_t *out_len,
++	uint32_t timeout_ms)
++{
++	VIDEO_FRAME_INFO_S frame;
++	VENC_STREAM_S stream;
++	VENC_PACK_S pack;
++	RK_S32 ret, wait = timeout_ms ? (RK_S32)timeout_ms : 1000;
++	const uint8_t *data;
++	int rc = -EIO;
++
++	if (!g_ready || !out_buf || !out_len)
++		return -ENOENT;
++
++	memset(&frame, 0, sizeof(frame));
++	ret = RK_MPI_VI_GetChnFrame(RV_VI_PIPE, RV_VI_CHN, &frame, wait);
++	if (ret != RK_SUCCESS)
++		return -ETIMEDOUT;
++
++	ret = RK_MPI_VENC_SendFrame(RV_JPEG_VENC_CHN, &frame, wait);
++	if (ret != RK_SUCCESS) {
++		RK_MPI_VI_ReleaseChnFrame(RV_VI_PIPE, RV_VI_CHN, &frame);
++		return -EIO;
++	}
++
++	memset(&stream, 0, sizeof(stream));
++	memset(&pack, 0, sizeof(pack));
++	stream.pstPack = &pack;
++	ret = RK_MPI_VENC_GetStream(RV_JPEG_VENC_CHN, &stream, wait);
++	if (ret == RK_SUCCESS) {
++		data = RK_MPI_MB_Handle2VirAddr(pack.pMbBlk);
++		if (data && pack.u32Len) {
++			uint8_t *copy = malloc(pack.u32Len);
++
++			if (copy) {
++				memcpy(copy, data, pack.u32Len);
++				*out_buf = copy;
++				*out_len = pack.u32Len;
++				rc = 0;
++			} else {
++				rc = -ENOMEM;
++			}
++		}
++		RK_MPI_VENC_ReleaseStream(RV_JPEG_VENC_CHN, &stream);
++	} else {
++		rc = -ETIMEDOUT;
++	}
++	RK_MPI_VI_ReleaseChnFrame(RV_VI_PIPE, RV_VI_CHN, &frame);
++	return rc;
++}
++
++void venc_jpeg_backend_shutdown(void)
++{
++	g_ready = 0;
++	if (g_venc_up) {
++		RK_MPI_VENC_StopRecvFrame(RV_JPEG_VENC_CHN);
++		RK_MPI_VENC_DestroyChn(RV_JPEG_VENC_CHN);
++	}
++	if (g_vi_up)
++		RK_MPI_VI_DisableChn(RV_VI_PIPE, RV_VI_CHN);
++	g_venc_up = g_vi_up = 0;
++}
++
++int venc_jpeg_backend_set_quality(uint32_t q)
++{
++	VENC_JPEG_PARAM_S jp;
++
++	if (!g_venc_up)
++		return -ENOENT;
++	if (q < 1)
++		q = 1;
++	if (q > 99)
++		q = 99;
++	memset(&jp, 0, sizeof(jp));
++	jp.u32Qfactor = q;
++	if (RK_MPI_VENC_SetJpegParam(RV_JPEG_VENC_CHN, &jp) != RK_SUCCESS)
++		return -EIO;
++	g_quality = q;
++	return 0;
++}
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/rv1106_runtime.c wv2/waybeam_venc-master/src/rv1106_runtime.c
+--- orig/waybeam_venc-master/src/rv1106_runtime.c	1970-01-01 00:00:00.000000000 +0000
++++ wv2/waybeam_venc-master/src/rv1106_runtime.c	2026-11-07 12:20:50.721366896 +0000
+@@ -0,0 +1,785 @@
++/* Rockchip RV1106 backend: RKAIQ ISP -> VI -> (SYS_Bind) -> VENC H.265
++ * -> RTP over UDP, plus the shared HTTP API / web dashboard and a JPEG
++ * snapshot channel (rv1106_jpeg.c) that feeds the dashboard live view.
++ * Targets Luckfox Pico Ultra with the MIS5001 MIPI sensor. */
++#include "rv1106_runtime.h"
++
++#include "hevc_rtp.h"
++#include "h26x_util.h"
++#include "output_socket.h"
++#include "rtp_packetizer.h"
++#include "rtp_session.h"
++#include "venc_api.h"
++#include "venc_config.h"
++#include "venc_httpd.h"
++#include "venc_jpeg.h"
++#include "venc_respawn.h"
++
++#include <pthread.h>
++#include <dirent.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <linux/v4l2-subdev.h>
++#include <linux/media-bus-format.h>
++#include <signal.h>
++#include <sys/syscall.h>
++#include <ucontext.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "rk_aiq_user_api2_sysctl.h"
++#include "rk_debug.h"
++#include "rk_defines.h"
++#include "rk_mpi_mb.h"
++#include "rk_mpi_sys.h"
++#include "rk_mpi_venc.h"
++#include "rk_mpi_vi.h"
++
++/* The only mode the stock mis5001 kernel driver exposes. */
++#define RV1106_SENSOR_W 2592
++#define RV1106_SENSOR_H 1944
++#define RV1106_SENSOR_MAX_FPS 25
++
++#define RV1106_VI_DEV 0
++#define RV1106_VI_PIPE 0
++#define RV1106_VI_CHN 0
++#define RV1106_VENC_CHN 0
++#define RV1106_CAM_ID 0
++#define RV1106_IQ_DIR_DEFAULT "/etc/iqfiles"
++#define RV1106_GET_STREAM_TIMEOUT_MS 1000
++
++typedef struct {
++	VencConfig cfg;
++	VencOutputUri uri;
++	rk_aiq_sys_ctx_t *aiq;
++	bool sys_up;
++	bool vi_up;
++	bool venc_up;
++	bool bound;
++	uint32_t width;
++	uint32_t height;
++	uint32_t fps;
++	int sock;
++	struct sockaddr_storage dst;
++	socklen_t dst_len;
++	VencOutputUriType transport;
++	int connected_udp;
++	RtpPacketizerState rtp;
++	uint32_t frame_ticks;
++	HevcRtpStats rtp_stats;
++	pthread_mutex_t out_lock;   /* guards sock/dst/transport swaps */
++	int output_enabled;
++	int verbose;
++	uint32_t live_fps;          /* frames delivered in the last second */
++	bool httpd_up;
++	uint64_t last_pts_us;       /* camera timestamp of the previous AU */
++} Rv1106Ctx;
++
++static Rv1106Ctx *g_rv;
++
++static volatile sig_atomic_t g_stop;
++
++/* Debug aid for first bring-up: report where a crash happened (PC/LR plus the
++ * module map) so it can be symbolised against the matching build. */
++static void on_fatal(int sig, siginfo_t *si, void *uc_v)
++{
++	const ucontext_t *uc = uc_v;
++	char buf[256];
++	int n, fd;
++	ssize_t r;
++
++	n = snprintf(buf, sizeof(buf),
++		"\nFATAL: signal %d tid %ld fault_addr %p pc %08lx lr %08lx sp %08lx\n",
++		sig, (long)syscall(SYS_gettid), si ? si->si_addr : NULL,
++		(unsigned long)uc->uc_mcontext.arm_pc,
++		(unsigned long)uc->uc_mcontext.arm_lr,
++		(unsigned long)uc->uc_mcontext.arm_sp);
++	if (n > 0)
++		(void)!write(2, buf, (size_t)n);
++	fd = open("/proc/self/maps", O_RDONLY);
++	if (fd >= 0) {
++		while ((r = read(fd, buf, sizeof(buf))) > 0)
++			(void)!write(2, buf, (size_t)r);
++		close(fd);
++	}
++	_exit(139);
++}
++
++static void rv1106_install_crash_handler(void)
++{
++	struct sigaction sa;
++
++	memset(&sa, 0, sizeof(sa));
++	sa.sa_sigaction = on_fatal;
++	sa.sa_flags = SA_SIGINFO;
++	sigaction(SIGSEGV, &sa, NULL);
++	sigaction(SIGBUS, &sa, NULL);
++	sigaction(SIGABRT, &sa, NULL);
++}
++
++static void on_signal(int sig)
++{
++	(void)sig;
++	g_stop = 1;
++}
++
++static VencConfig *rv1106_config(void *ctx)
++{
++	return &((Rv1106Ctx *)ctx)->cfg;
++}
++
++static int rv1106_prepare(void *opaque)
++{
++	Rv1106Ctx *c = opaque;
++	const VencConfigVideo *v = &c->cfg.video0;
++
++	c->width = v->width ? v->width : RV1106_SENSOR_W;
++	c->height = v->height ? v->height : RV1106_SENSOR_H;
++	c->fps = v->fps ? v->fps : RV1106_SENSOR_MAX_FPS;
++
++	/* VENC needs 16-aligned geometry on RV1106. */
++	c->width &= ~1u;
++	c->height &= ~1u;
++
++	pthread_mutex_init(&c->out_lock, NULL);
++	c->sock = -1;
++	c->verbose = c->cfg.system.verbose;
++	c->output_enabled = c->cfg.outgoing.enabled ? 1 : 0;
++	return 0;
++}
++
++/* Ask the sensor driver for the mode matching the requested size (the new
++ * mis5001 driver offers 2592x1944 and a 1920x1080 crop).  Best effort: if the
++ * driver only has one mode it keeps it and the ISP/VI path copes as before. */
++static void rv1106_sensor_select_mode(uint32_t w, uint32_t h)
++{
++	DIR *d = opendir("/sys/class/video4linux");
++	struct dirent *e;
++
++	if (!d)
++		return;
++	while ((e = readdir(d)) != NULL) {
++		char path[256], name[96] = "";
++		FILE *f;
++		int fd;
++		struct v4l2_subdev_format fmt;
++
++		if (strncmp(e->d_name, "v4l-subdev", 10) != 0)
++			continue;
++		snprintf(path, sizeof(path), "/sys/class/video4linux/%s/name",
++			e->d_name);
++		f = fopen(path, "r");
++		if (!f)
++			continue;
++		if (!fgets(name, sizeof(name), f))
++			name[0] = 0;
++		fclose(f);
++		if (!strstr(name, "mis5001"))
++			continue;
++
++		snprintf(path, sizeof(path), "/dev/%s", e->d_name);
++		fd = open(path, O_RDWR);
++		if (fd < 0)
++			break;
++		memset(&fmt, 0, sizeof(fmt));
++		fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
++		fmt.pad = 0;
++		fmt.format.width = w;
++		fmt.format.height = h;
++		fmt.format.code = MEDIA_BUS_FMT_SGRBG10_1X10;
++		fmt.format.field = V4L2_FIELD_NONE;
++		if (ioctl(fd, VIDIOC_SUBDEV_S_FMT, &fmt) == 0)
++			printf("> Sensor mode: %ux%u (requested %ux%u) on %s\n",
++				fmt.format.width, fmt.format.height, w, h,
++				e->d_name);
++		else
++			fprintf(stderr, "WARN: sensor S_FMT %ux%u failed on %s\n",
++				w, h, e->d_name);
++		close(fd);
++		break;
++	}
++	closedir(d);
++}
++
++static int rv1106_isp_start(Rv1106Ctx *c)
++{
++	const char *iq_dir = getenv("WAYBEAM_IQ_DIR");
++	rk_aiq_static_info_t info;
++	char hdr[8];
++
++	if (!iq_dir || !*iq_dir)
++		iq_dir = RV1106_IQ_DIR_DEFAULT;
++
++	rv1106_sensor_select_mode(c->width, c->height);
++
++	snprintf(hdr, sizeof(hdr), "%d", (int)RK_AIQ_WORKING_MODE_NORMAL);
++	setenv("HDR_MODE", hdr, 1);
++
++	memset(&info, 0, sizeof(info));
++	if (rk_aiq_uapi2_sysctl_enumStaticMetasByPhyId(RV1106_CAM_ID, &info)) {
++		fprintf(stderr, "ERROR: no sensor found on CSI port %d "
++			"(is the mis5001 driver loaded? check dmesg)\n",
++			RV1106_CAM_ID);
++		return -1;
++	}
++	printf("> ISP: sensor %s, iqfiles %s\n", info.sensor_info.sensor_name,
++		iq_dir);
++
++	rk_aiq_uapi2_sysctl_preInit_devBufCnt(info.sensor_info.sensor_name,
++		"rkraw_rx", 2);
++	c->aiq = rk_aiq_uapi2_sysctl_init(info.sensor_info.sensor_name,
++		iq_dir, NULL, NULL);
++	if (!c->aiq) {
++		fprintf(stderr, "ERROR: rk_aiq init failed (IQ file missing "
++			"for %s in %s?)\n", info.sensor_info.sensor_name,
++			iq_dir);
++		return -1;
++	}
++	if (rk_aiq_uapi2_sysctl_prepare(c->aiq, 0, 0,
++		RK_AIQ_WORKING_MODE_NORMAL) ||
++	    rk_aiq_uapi2_sysctl_start(c->aiq)) {
++		fprintf(stderr, "ERROR: rk_aiq prepare/start failed\n");
++		rk_aiq_uapi2_sysctl_deinit(c->aiq);
++		c->aiq = NULL;
++		return -1;
++	}
++	return 0;
++}
++
++static int rv1106_vi_start(Rv1106Ctx *c)
++{
++	VI_DEV_ATTR_S dev_attr;
++	VI_DEV_BIND_PIPE_S bind_pipe;
++	VI_CHN_ATTR_S chn;
++	RK_S32 ret;
++
++	memset(&dev_attr, 0, sizeof(dev_attr));
++	memset(&bind_pipe, 0, sizeof(bind_pipe));
++	memset(&chn, 0, sizeof(chn));
++
++	ret = RK_MPI_VI_GetDevAttr(RV1106_VI_DEV, &dev_attr);
++	if (ret == RK_ERR_VI_NOT_CONFIG) {
++		ret = RK_MPI_VI_SetDevAttr(RV1106_VI_DEV, &dev_attr);
++		if (ret != RK_SUCCESS) {
++			fprintf(stderr, "ERROR: VI_SetDevAttr %#x\n", ret);
++			return -1;
++		}
++	}
++	if (RK_MPI_VI_GetDevIsEnable(RV1106_VI_DEV) != RK_SUCCESS) {
++		ret = RK_MPI_VI_EnableDev(RV1106_VI_DEV);
++		if (ret != RK_SUCCESS) {
++			fprintf(stderr, "ERROR: VI_EnableDev %#x\n", ret);
++			return -1;
++		}
++		bind_pipe.u32Num = 1;
++		bind_pipe.PipeId[0] = RV1106_VI_PIPE;
++		ret = RK_MPI_VI_SetDevBindPipe(RV1106_VI_DEV, &bind_pipe);
++		if (ret != RK_SUCCESS) {
++			fprintf(stderr, "ERROR: VI_SetDevBindPipe %#x\n", ret);
++			return -1;
++		}
++	}
++
++	chn.stIspOpt.u32BufCount = 2;
++	chn.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
++	chn.stSize.u32Width = c->width;
++	chn.stSize.u32Height = c->height;
++	chn.enPixelFormat = RK_FMT_YUV420SP;
++	chn.enCompressMode = COMPRESS_MODE_NONE;
++	chn.u32Depth = 0;
++	chn.bMirror = c->cfg.image.mirror ? RK_TRUE : RK_FALSE;
++	chn.bFlip = c->cfg.image.flip ? RK_TRUE : RK_FALSE;
++	ret = RK_MPI_VI_SetChnAttr(RV1106_VI_PIPE, RV1106_VI_CHN, &chn);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "ERROR: VI_SetChnAttr %#x\n", ret);
++		return -1;
++	}
++	ret = RK_MPI_VI_EnableChn(RV1106_VI_PIPE, RV1106_VI_CHN);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "ERROR: VI_EnableChn %#x\n", ret);
++		return -1;
++	}
++	c->vi_up = true;
++	return 0;
++}
++
++static void rv1106_fill_rc(Rv1106Ctx *c, VENC_RC_ATTR_S *rc)
++{
++	const VencConfigVideo *v = &c->cfg.video0;
++	uint32_t gop = (uint32_t)(v->gop_size * c->fps + 0.5);
++
++	if (gop == 0)
++		gop = 1; /* all-intra */
++
++	if (!strcmp(v->rc_mode, "vbr")) {
++		rc->enRcMode = VENC_RC_MODE_H265VBR;
++		rc->stH265Vbr.u32Gop = gop;
++		rc->stH265Vbr.u32SrcFrameRateNum = c->fps;
++		rc->stH265Vbr.u32SrcFrameRateDen = 1;
++		rc->stH265Vbr.fr32DstFrameRateNum = c->fps;
++		rc->stH265Vbr.fr32DstFrameRateDen = 1;
++		rc->stH265Vbr.u32BitRate = v->bitrate;
++		rc->stH265Vbr.u32MaxBitRate = v->bitrate * 3 / 2;
++		rc->stH265Vbr.u32MinBitRate = v->bitrate / 4;
++	} else if (!strcmp(v->rc_mode, "avbr")) {
++		rc->enRcMode = VENC_RC_MODE_H265AVBR;
++		rc->stH265Avbr.u32Gop = gop;
++		rc->stH265Avbr.u32SrcFrameRateNum = c->fps;
++		rc->stH265Avbr.u32SrcFrameRateDen = 1;
++		rc->stH265Avbr.fr32DstFrameRateNum = c->fps;
++		rc->stH265Avbr.fr32DstFrameRateDen = 1;
++		rc->stH265Avbr.u32BitRate = v->bitrate;
++		rc->stH265Avbr.u32MaxBitRate = v->bitrate * 3 / 2;
++		rc->stH265Avbr.u32MinBitRate = v->bitrate / 4;
++	} else { /* "cbr" and anything else */
++		rc->enRcMode = VENC_RC_MODE_H265CBR;
++		rc->stH265Cbr.u32Gop = gop;
++		rc->stH265Cbr.u32SrcFrameRateNum = c->fps;
++		rc->stH265Cbr.u32SrcFrameRateDen = 1;
++		rc->stH265Cbr.fr32DstFrameRateNum = c->fps;
++		rc->stH265Cbr.fr32DstFrameRateDen = 1;
++		rc->stH265Cbr.u32BitRate = v->bitrate;
++	}
++}
++
++static int rv1106_venc_start(Rv1106Ctx *c)
++{
++	VENC_CHN_ATTR_S a;
++	VENC_RECV_PIC_PARAM_S recv;
++	VENC_CHN_REF_BUF_SHARE_S share;
++	RK_S32 ret;
++
++	memset(&a, 0, sizeof(a));
++	memset(&recv, 0, sizeof(recv));
++	memset(&share, 0, sizeof(share));
++
++	a.stVencAttr.enType = RK_VIDEO_ID_HEVC;
++	a.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
++	a.stVencAttr.u32Profile = H265E_PROFILE_MAIN;
++	a.stVencAttr.u32MaxPicWidth = c->width;
++	a.stVencAttr.u32MaxPicHeight = c->height;
++	a.stVencAttr.u32PicWidth = c->width;
++	a.stVencAttr.u32PicHeight = c->height;
++	a.stVencAttr.u32VirWidth = c->width;
++	a.stVencAttr.u32VirHeight = c->height;
++	a.stVencAttr.u32StreamBufCnt = 4;
++	a.stVencAttr.u32BufSize = c->width * c->height / 2;
++	a.stGopAttr.enGopMode = VENC_GOPMODE_NORMALP;
++	rv1106_fill_rc(c, &a.stRcAttr);
++
++	ret = RK_MPI_VENC_CreateChn(RV1106_VENC_CHN, &a);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "ERROR: VENC_CreateChn %#x\n", ret);
++		return -1;
++	}
++	c->venc_up = true;
++
++	share.bEnable = RK_TRUE;
++	(void)RK_MPI_VENC_SetChnRefBufShareAttr(RV1106_VENC_CHN, &share);
++
++	recv.s32RecvPicNum = -1;
++	ret = RK_MPI_VENC_StartRecvFrame(RV1106_VENC_CHN, &recv);
++	if (ret != RK_SUCCESS) {
++		fprintf(stderr, "ERROR: VENC_StartRecvFrame %#x\n", ret);
++		return -1;
++	}
++	return 0;
++}
++
++/* (Re)open the transport for `uri_str`.  Used at startup and by the live
++ * outgoing.server callback; the RTP session state is seeded only once so
++ * the receiver sees a continuous sequence across a destination change. */
++static int rv1106_output_configure(Rv1106Ctx *c, const char *uri_str)
++{
++	VencOutputUri uri;
++	struct sockaddr_storage dst;
++	socklen_t dst_len = 0;
++	VencOutputUriType transport;
++	int sock = -1, connected = 0;
++
++	if (venc_config_parse_output_uri(uri_str, &uri) != 0 ||
++	    (uri.type != VENC_OUTPUT_URI_UDP &&
++	     uri.type != VENC_OUTPUT_URI_UNIX)) {
++		fprintf(stderr, "ERROR: unsupported output URI '%s' "
++			"(udp:// or unix:// only)\n", uri_str);
++		return -1;
++	}
++	transport = uri.type;
++	if (output_socket_configure(&sock, &dst, &dst_len, &transport, &uri,
++		c->cfg.outgoing.connected_udp,
++		c->cfg.outgoing.allow_unix_encoder_stall, &connected) != 0) {
++		fprintf(stderr, "ERROR: cannot open output %s\n", uri_str);
++		return -1;
++	}
++	pthread_mutex_lock(&c->out_lock);
++	if (c->sock >= 0)
++		close(c->sock);
++	c->sock = sock;
++	c->dst = dst;
++	c->dst_len = dst_len;
++	c->transport = transport;
++	c->connected_udp = connected;
++	c->uri = uri;
++	pthread_mutex_unlock(&c->out_lock);
++	return 0;
++}
++
++static void rv1106_rtp_seed(Rv1106Ctx *c)
++{
++	RtpSessionState sess;
++
++	rtp_session_init(&sess, rtp_session_payload_type(PT_H265), c->fps);
++	c->rtp.seq = sess.seq;
++	c->rtp.timestamp = sess.timestamp;
++	c->rtp.ssrc = sess.ssrc;
++	c->rtp.payload_type = sess.payload_type;
++	c->frame_ticks = sess.frame_ticks;
++}
++
++/* ── Live-apply callbacks (HTTP API) ─────────────────────────────────── */
++
++static int rv1106_update_rc(Rv1106Ctx *c, uint32_t bitrate, uint32_t gop)
++{
++	VENC_CHN_ATTR_S a;
++	uint32_t *br = NULL, *g = NULL;
++
++	(void)c;
++	if (RK_MPI_VENC_GetChnAttr(RV1106_VENC_CHN, &a) != RK_SUCCESS)
++		return -1;
++	switch (a.stRcAttr.enRcMode) {
++	case VENC_RC_MODE_H265CBR:
++		br = &a.stRcAttr.stH265Cbr.u32BitRate;
++		g = &a.stRcAttr.stH265Cbr.u32Gop;
++		break;
++	case VENC_RC_MODE_H265VBR:
++		br = &a.stRcAttr.stH265Vbr.u32BitRate;
++		g = &a.stRcAttr.stH265Vbr.u32Gop;
++		a.stRcAttr.stH265Vbr.u32MaxBitRate = bitrate ? bitrate * 3 / 2 : 0;
++		break;
++	case VENC_RC_MODE_H265AVBR:
++		br = &a.stRcAttr.stH265Avbr.u32BitRate;
++		g = &a.stRcAttr.stH265Avbr.u32Gop;
++		a.stRcAttr.stH265Avbr.u32MaxBitRate = bitrate ? bitrate * 3 / 2 : 0;
++		break;
++	default:
++		return -1;
++	}
++	if (bitrate)
++		*br = bitrate;
++	if (gop)
++		*g = gop;
++	return RK_MPI_VENC_SetChnAttr(RV1106_VENC_CHN, &a) == RK_SUCCESS ? 0 : -1;
++}
++
++static int rv1106_apply_bitrate(uint32_t kbps)
++{
++	return g_rv && kbps ? rv1106_update_rc(g_rv, kbps, 0) : -1;
++}
++
++static int rv1106_apply_gop(uint32_t frames)
++{
++	return g_rv ? rv1106_update_rc(g_rv, 0, frames ? frames : 1) : -1;
++}
++
++static int rv1106_apply_verbose(bool on)
++{
++	if (!g_rv)
++		return -1;
++	__atomic_store_n(&g_rv->verbose, on ? 1 : 0, __ATOMIC_RELEASE);
++	return 0;
++}
++
++static int rv1106_request_idr(void)
++{
++	return g_rv && RK_MPI_VENC_RequestIDR(RV1106_VENC_CHN, RK_FALSE) ==
++		RK_SUCCESS ? 0 : -1;
++}
++
++static uint32_t rv1106_query_live_fps(void)
++{
++	return g_rv ? __atomic_load_n(&g_rv->live_fps, __ATOMIC_ACQUIRE) : 0;
++}
++
++static int rv1106_apply_max_payload_size(uint16_t size)
++{
++	(void)size; /* read from the shared config on every access unit */
++	return g_rv ? 0 : -1;
++}
++
++static int rv1106_apply_server(const char *uri)
++{
++	if (!g_rv || !uri || !*uri)
++		return -1;
++	if (rv1106_output_configure(g_rv, uri) != 0)
++		return -1;
++	(void)rv1106_request_idr();
++	return 0;
++}
++
++static int rv1106_apply_output_enabled(bool on)
++{
++	if (!g_rv)
++		return -1;
++	if (on && g_rv->sock < 0 &&
++	    rv1106_apply_server(g_rv->cfg.outgoing.server) != 0)
++		return -1;
++	__atomic_store_n(&g_rv->output_enabled, on ? 1 : 0, __ATOMIC_RELEASE);
++	if (on)
++		(void)rv1106_request_idr();
++	return 0;
++}
++
++static const VencApplyCallbacks g_rv1106_callbacks = {
++	.apply_bitrate = rv1106_apply_bitrate,
++	.apply_gop = rv1106_apply_gop,
++	.apply_verbose = rv1106_apply_verbose,
++	.request_idr = rv1106_request_idr,
++	.query_live_fps = rv1106_query_live_fps,
++	.apply_max_payload_size = rv1106_apply_max_payload_size,
++	.apply_server = rv1106_apply_server,
++	.apply_output_enabled = rv1106_apply_output_enabled,
++	.apply_snapshot_quality = venc_jpeg_set_quality,
++};
++
++static int rv1106_snapshot_start(Rv1106Ctx *c)
++{
++	const VencConfigSnapshot *snap = &c->cfg.snapshot;
++	uint32_t pw = 640, ph = (pw * c->height / c->width + 1u) & ~1u;
++	VencJpegConfig jcfg = {
++		.width = pw,
++		.height = ph ? ph : 480,
++		.quality = snap->quality,
++		.channel = snap->channel,
++		.enabled = snap->enabled,
++	};
++
++	/* Best effort: a failed preview must not take the video link down. */
++	(void)venc_jpeg_init(&jcfg);
++	return 0;
++}
++
++static int rv1106_init(void *opaque)
++{
++	Rv1106Ctx *c = opaque;
++	MPP_CHN_S src = { .enModId = RK_ID_VI, .s32DevId = RV1106_VI_DEV,
++		.s32ChnId = RV1106_VI_CHN };
++	MPP_CHN_S dst = { .enModId = RK_ID_VENC, .s32DevId = 0,
++		.s32ChnId = RV1106_VENC_CHN };
++
++	if (rv1106_isp_start(c) != 0)
++		return -1;
++	if (RK_MPI_SYS_Init() != RK_SUCCESS) {
++		fprintf(stderr, "ERROR: RK_MPI_SYS_Init failed\n");
++		return -1;
++	}
++	c->sys_up = true;
++	if (rv1106_vi_start(c) != 0 || rv1106_venc_start(c) != 0)
++		return -1;
++	if (RK_MPI_SYS_Bind(&src, &dst) != RK_SUCCESS) {
++		fprintf(stderr, "ERROR: SYS_Bind VI->VENC failed\n");
++		return -1;
++	}
++	c->bound = true;
++	rv1106_rtp_seed(c);
++	if (c->cfg.outgoing.server[0] &&
++	    rv1106_output_configure(c, c->cfg.outgoing.server) != 0 &&
++	    c->output_enabled)
++		return -1;
++
++	g_rv = c;
++	if (venc_api_register(&c->cfg, "rv1106", &g_rv1106_callbacks, NULL) != 0)
++		return -1;
++	(void)rv1106_snapshot_start(c);
++	if (venc_httpd_start(c->cfg.system.web_port) != 0)
++		return -1;
++	c->httpd_up = true;
++
++	printf("> RV1106: %ux%u@%u H.265 %s %ukbps -> %s\n", c->width,
++		c->height, c->fps, c->cfg.video0.rc_mode,
++		c->cfg.video0.bitrate, c->cfg.outgoing.server);
++	printf("> Web UI: http://<board-ip>:%u/\n", c->cfg.system.web_port);
++	return 0;
++}
++
++static int rtp_write(const uint8_t *header, size_t header_len,
++	const uint8_t *p1, size_t p1_len, const uint8_t *p2, size_t p2_len,
++	void *opaque)
++{
++	Rv1106Ctx *c = opaque;
++
++	return output_socket_send_parts(c->sock, &c->dst, c->dst_len,
++		c->connected_udp, header, header_len, p1, p1_len, p2, p2_len);
++}
++
++/* One VENC pack holds a whole Annex-B access unit (VPS/SPS/PPS inline on
++ * IDR).  Walk its NALs; the last one carries the RTP marker bit. */
++static void rv1106_send_au(Rv1106Ctx *c, const uint8_t *au, size_t len,
++	uint64_t pts_us)
++{
++	const uint8_t *nal, *next_nal;
++	size_t cur = 0, next_len, nal_len;
++	size_t max_payload = c->cfg.outgoing.max_payload_size;
++
++	if (!__atomic_load_n(&c->output_enabled, __ATOMIC_ACQUIRE))
++		return;
++	pthread_mutex_lock(&c->out_lock);
++	if (c->sock < 0) {
++		pthread_mutex_unlock(&c->out_lock);
++		return;
++	}
++
++	if (!max_payload)
++		max_payload = RTP_DEFAULT_PAYLOAD;
++	if (!h26x_util_annexb_next(au, len, &cur, &nal, &nal_len)) {
++		pthread_mutex_unlock(&c->out_lock);
++		return;
++	}
++	for (;;) {
++		int more = h26x_util_annexb_next(au, len, &cur, &next_nal,
++			&next_len);
++
++		hevc_rtp_send_nal(nal, nal_len, &c->rtp, rtp_write, c,
++			!more, max_payload, &c->rtp_stats);
++		if (!more)
++			break;
++		nal = next_nal;
++		nal_len = next_len;
++	}
++	/* Advance the 90 kHz RTP clock by the real time between frames (camera
++	 * PTS, microseconds) so playback speed follows the sensor, not the
++	 * configured fps.  Fall back to the nominal tick on a bad timestamp. */
++	{
++		uint64_t d = (c->last_pts_us && pts_us > c->last_pts_us) ?
++			pts_us - c->last_pts_us : 0;
++
++		if (d > 0 && d < 1000000ULL)
++			c->rtp.timestamp += (uint32_t)(d * 9 / 100);
++		else
++			c->rtp.timestamp += c->frame_ticks;
++		c->last_pts_us = pts_us;
++	}
++	pthread_mutex_unlock(&c->out_lock);
++}
++
++static int rv1106_run(void *opaque)
++{
++	Rv1106Ctx *c = opaque;
++	struct sigaction sa;
++	VENC_STREAM_S stream;
++	VENC_PACK_S pack;
++	time_t last_log = time(NULL);
++	uint32_t frames = 0, bytes = 0;
++
++	rv1106_install_crash_handler();
++	memset(&sa, 0, sizeof(sa));
++	sa.sa_handler = on_signal;
++	sigaction(SIGINT, &sa, NULL);
++	sigaction(SIGTERM, &sa, NULL);
++
++	while (!g_stop) {
++		RK_S32 ret;
++
++		if (venc_api_get_reinit()) {
++			venc_api_clear_reinit();
++			venc_respawn_request();
++			printf("> RV1106 reinit requested: cold restart via "
++				"fork+exec\n");
++			break;
++		}
++		memset(&stream, 0, sizeof(stream));
++		memset(&pack, 0, sizeof(pack));
++		stream.pstPack = &pack;
++		ret = RK_MPI_VENC_GetStream(RV1106_VENC_CHN, &stream,
++			RV1106_GET_STREAM_TIMEOUT_MS);
++		if (ret != RK_SUCCESS)
++			continue;
++
++		const uint8_t *base = RK_MPI_MB_Handle2VirAddr(pack.pMbBlk);
++		static int first = 1;
++
++		if (first) {
++			printf("rv1106: first AU len=%u off=%u base=%p\n",
++				pack.u32Len, pack.u32Offset, (const void *)base);
++			fflush(stdout);
++		}
++		if (base && pack.u32Len)
++			rv1106_send_au(c, base, pack.u32Len, pack.u64PTS);
++		if (first) {
++			printf("rv1106: first AU sent\n");
++			fflush(stdout);
++			first = 0;
++		}
++		frames++;
++		bytes += pack.u32Len;
++		RK_MPI_VENC_ReleaseStream(RV1106_VENC_CHN, &stream);
++
++		if (time(NULL) != last_log) {
++			__atomic_store_n(&c->live_fps, frames, __ATOMIC_RELEASE);
++			if (__atomic_load_n(&c->verbose, __ATOMIC_ACQUIRE))
++				printf("rv1106: %u fps, %u kbit/s\n", frames,
++					bytes * 8 / 1000);
++			frames = bytes = 0;
++			last_log = time(NULL);
++		}
++	}
++	return 0;
++}
++
++static void rv1106_teardown(void *opaque)
++{
++	Rv1106Ctx *c = opaque;
++	MPP_CHN_S src = { .enModId = RK_ID_VI, .s32DevId = RV1106_VI_DEV,
++		.s32ChnId = RV1106_VI_CHN };
++	MPP_CHN_S dst = { .enModId = RK_ID_VENC, .s32DevId = 0,
++		.s32ChnId = RV1106_VENC_CHN };
++
++	if (c->httpd_up) {
++		venc_httpd_pause();
++		venc_httpd_stop();
++	}
++	venc_jpeg_shutdown();
++	if (c->bound)
++		RK_MPI_SYS_UnBind(&src, &dst);
++	if (c->venc_up) {
++		RK_MPI_VENC_StopRecvFrame(RV1106_VENC_CHN);
++		RK_MPI_VENC_DestroyChn(RV1106_VENC_CHN);
++	}
++	if (c->vi_up) {
++		RK_MPI_VI_DisableChn(RV1106_VI_PIPE, RV1106_VI_CHN);
++		RK_MPI_VI_DisableDev(RV1106_VI_DEV);
++	}
++	if (c->aiq) {
++		rk_aiq_uapi2_sysctl_stop(c->aiq, false);
++		rk_aiq_uapi2_sysctl_deinit(c->aiq);
++	}
++	if (c->sys_up)
++		RK_MPI_SYS_Exit();
++	if (c->sock >= 0)
++		close(c->sock);
++}
++
++static int rv1106_map_result(int result)
++{
++	return result == 0 ? 0 : 1;
++}
++
++static const BackendOps g_rv1106_ops = {
++	.name = "rv1106",
++	.context_size = sizeof(Rv1106Ctx),
++	.config = rv1106_config,
++	.prepare = rv1106_prepare,
++	.init = rv1106_init,
++	.run = rv1106_run,
++	.teardown = rv1106_teardown,
++	.map_pipeline_result = rv1106_map_result,
++};
++
++const BackendOps *rv1106_runtime_backend_ops(void)
++{
++	return &g_rv1106_ops;
++}
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/star6e_recorder.c wv2/waybeam_venc-master/src/star6e_recorder.c
+--- orig/waybeam_venc-master/src/star6e_recorder.c	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/src/star6e_recorder.c	2026-11-04 10:08:27.269592817 +0000
+@@ -6,7 +6,7 @@
+  * independent entry points directly.  Stated as "not those two" rather than
+  * "PLATFORM_STAR6E" because the host test build defines no platform macro
+  * at all and must keep compiling these. */
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ #include "star6e_output.h"
+ #endif
+ 
+@@ -186,7 +186,7 @@
+ 	return 0;
+ }
+ 
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ static ssize_t writev_all(int fd, const struct iovec *iov, int iov_count)
+ {
+ 	struct iovec pending[16];
+@@ -578,7 +578,7 @@
+  * the two — together with the larger maruko_recorder.c duplication — is a
+  * separate change with its own verification. */
+ 
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ /* Can a new segment open on this access unit?  An IRAP, or the parameter sets
+  * that head a GDR refresh wave -- see RecorderRotation.  Deliberately the same
+  * h265-only reading the TS recorder uses, so the two cannot disagree about
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/star6e_ts_recorder.c wv2/waybeam_venc-master/src/star6e_ts_recorder.c
+--- orig/waybeam_venc-master/src/star6e_ts_recorder.c	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/src/star6e_ts_recorder.c	2026-11-04 10:08:27.270618815 +0000
+@@ -6,7 +6,7 @@
+  * independent entry points directly.  Stated as "not those two" rather than
+  * "PLATFORM_STAR6E" because the host test build defines no platform macro
+  * at all and must keep compiling these. */
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ #include "star6e_output.h"
+ #endif
+ 
+@@ -555,7 +555,7 @@
+ 	return state && __atomic_load_n(&state->recording, __ATOMIC_ACQUIRE);
+ }
+ 
+-#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610)
++#if !defined(PLATFORM_MARUKO) && !defined(PLATFORM_CV610) && !defined(PLATFORM_RV1106)
+ int star6e_ts_recorder_write_stream(Star6eTsRecorderState *state,
+ 	const MI_VENC_Stream_t *stream)
+ {
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/src/venc_api.c wv2/waybeam_venc-master/src/venc_api.c
+--- orig/waybeam_venc-master/src/venc_api.c	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/src/venc_api.c	2026-11-04 14:52:28.489415591 +0000
+@@ -18,7 +18,7 @@
+ #include "maruko_pipeline.h"
+ #endif
+ #include "rtp_packetizer.h"
+-#if !HAVE_BACKEND_CV610
++#if !HAVE_BACKEND_CV610 && !HAVE_BACKEND_RV1106
+ #include "sensor_select.h"
+ #endif
+ /* The recorder state machine, its RECORDER_DEFAULT_DIR and the TS mux are
+@@ -869,6 +869,23 @@
+ 	if (f->mut == MUT_LIVE && strcmp(g_backend, "cv610") == 0 &&
+ 	    cv610_field_is_restart_only(f->key))
+ 		return MUT_RESTART;
++#if HAVE_BACKEND_RV1106
++	/* RV1106 applies only these without a respawn; every other live
++	 * field in the shared table is restart-class here. */
++	if (f->mut == MUT_LIVE && strcmp(g_backend, "rv1106") == 0) {
++		static const char *const live[] = {
++			"system.verbose", "video0.bitrate", "video0.gop_size",
++			"outgoing.enabled", "outgoing.server",
++			"outgoing.max_payload_size", "snapshot.quality",
++		};
++		size_t i;
++
++		for (i = 0; i < sizeof(live) / sizeof(live[0]); ++i)
++			if (strcmp(f->key, live[i]) == 0)
++				return MUT_LIVE;
++		return MUT_RESTART;
++	}
++#endif
+ 	return f->mut;
+ }
+ 
+@@ -894,6 +911,27 @@
+ 	 * fixed at 48000/1/opus/gain 8 in src/cv610_audio.c, and video0.rc_mode
+ 	 * is fixed at H.265 CBR in cv610_venc_start().  Advertising those would
+ 	 * accept a value the encoder never reads. */
++	/* RV1106 (Luckfox Pico Ultra): only fields rv1106_runtime.c reads. */
++	if (backend_name && strcmp(backend_name, "rv1106") == 0) {
++		static const char *const rv_supported[] = {
++			"system.web_port", "system.verbose",
++			"image.mirror", "image.flip",
++			"video0.fps", "video0.size", "video0.rc_mode",
++			"video0.bitrate", "video0.gop_size",
++			"outgoing.enabled", "outgoing.server",
++			"outgoing.max_payload_size", "outgoing.connected_udp",
++			"snapshot.enabled", "snapshot.quality",
++			"discovery.enabled", "discovery.service_type",
++			"discovery.name", "discovery.bare_alias",
++		};
++		size_t j;
++
++		for (j = 0; j < sizeof(rv_supported) / sizeof(rv_supported[0]); ++j)
++			if (strcmp(canonical_key, rv_supported[j]) == 0)
++				return 1;
++		return 0;
++	}
++
+ 	if (backend_name && strcmp(backend_name, "cv610") == 0) {
+ 		static const char *const supported[] = {
+ 			"system.web_port", "system.verbose",
+@@ -3846,7 +3884,7 @@
+ 
+ /* ── Dual VENC channel API ───────────────────────────────────────────── */
+ 
+-#if !HAVE_BACKEND_CV610
++#if !HAVE_BACKEND_CV610 && !HAVE_BACKEND_RV1106
+ #include "star6e.h"  /* MI_VENC_* */
+ #if HAVE_BACKEND_MARUKO
+ #include "maruko_controls.h"
+@@ -4331,11 +4369,11 @@
+ 
+ static int handle_dual_idr(int fd, const HttpRequest *req, void *ctx)
+ {
+-#if HAVE_BACKEND_CV610
++#if HAVE_BACKEND_CV610 || HAVE_BACKEND_RV1106
+ 	(void)req;
+ 	(void)ctx;
+ 	return httpd_send_error(fd, 501, "not_implemented",
+-		"dual VENC is not available on CV610");
++		"dual VENC is not available on this backend");
+ #else
+ 	MI_VENC_CHN ch;
+ 	int ret;
+@@ -4421,6 +4459,14 @@
+ 	rc = httpd_send_json(fd, 200, str);
+ 	free(str);
+ 	return rc;
++#elif HAVE_BACKEND_RV1106
++	/* The stock mis5001 kernel driver exposes exactly one mode. */
++	static const char k_modes[] =
++		"{\"ok\":true,\"data\":{\"selected_pad\":0,\"selected_mode\":0,"
++		"\"pads\":[{\"pad\":0,\"modes\":[{\"index\":0,\"width\":2592,"
++		"\"height\":1944,\"min_fps\":1,\"max_fps\":25,"
++		"\"desc\":\"mis5001 2592x1944 SGRBG10\",\"selected\":true}]}]}}";
++	return httpd_send_json(fd, 200, k_modes);
+ #else
+ 	pthread_mutex_lock(&g_cfg_mutex);
+ 	int pad = g_sensor_pad, mode = g_sensor_mode, forced = g_sensor_forced_pad;
+diff -ruN -x out -x venc_webui.c -x .git orig/waybeam_venc-master/web/dashboard.html wv2/waybeam_venc-master/web/dashboard.html
+--- orig/waybeam_venc-master/web/dashboard.html	2026-09-14 15:36:41.000000000 +0000
++++ wv2/waybeam_venc-master/web/dashboard.html	2026-11-05 04:17:02.161266367 +0000
+@@ -338,6 +338,8 @@
+ 
+   <div class="tab active" onclick="switchTab('settings')">Settings</div>
+ 
++  <div class="tab" id="tab-btn-live" onclick="switchTab('live')">Live</div>
++
+   <div class="tab" onclick="switchTab('api')">API Reference</div>
+ 
+   <!-- Visible by default. applyIQCapability() hides it only when
+@@ -530,6 +532,30 @@
+ 
+ </div>
+ 
++<!-- Tab: Live view (JPEG snapshot polling) -->
++
++<div class="tab-content" id="tab-live">
++  <div class="rec-header">
++    <div class="rec-meta">
++      <div>preview: <b id="live-res">&mdash;</b></div>
++      <div>rate: <b id="live-rate">&mdash;</b></div>
++      <div>state: <b id="live-state">stopped</b></div>
++    </div>
++    <div class="rec-actions">
++      <select id="live-fps" onchange="liveRestart()">
++        <option value="2">2 fps</option>
++        <option value="5" selected>5 fps</option>
++        <option value="10">10 fps</option>
++      </select>
++      <button class="btn btn-apply" onclick="liveIdr()">Force keyframe</button>
++    </div>
++  </div>
++  <div style="padding:1rem;text-align:center">
++    <img id="live-img" alt="live preview" style="max-width:100%;max-height:75vh;background:#000;border-radius:6px;display:none">
++    <div id="live-msg" style="color:var(--text2,#888);padding:2rem">Opening preview&hellip;</div>
++  </div>
++</div>
++
+ <!-- Tab: Recordings -->
+ 
+ <div class="tab-content" id="tab-recordings">
+@@ -786,7 +812,7 @@
+ 
+   document.querySelectorAll('.tab').forEach((t,i) => {
+ 
+-    const ids = ['settings','api','iq','recordings'];
++    const ids = ['settings','live','api','iq','recordings'];
+ 
+     t.classList.toggle('active', ids[i] === id);
+ 
+@@ -801,6 +827,9 @@
+   if(id === 'iq') renderIQCategories().catch(e =>
+     toast('IQ load failed: ' + e.message, false));
+ 
++  liveStop();
++  if(id === 'live') liveStart();
++
+   if(window._recPoll){ clearInterval(window._recPoll); window._recPoll = null; }
+   if(id === 'recordings'){
+     refreshRecordings();
+@@ -810,6 +839,56 @@
+ 
+ }
+ 
++/* ── Live view ──
++   Polls /api/v1/snapshot.jpg back-to-back at the chosen rate.  The preview
++   comes from a small dedicated JPEG channel, not the main H.265 stream, so
++   it costs the video link nothing while the tab is closed. */
++
++let _live = {on:false, n:0, t0:0, timer:null};
++
++function liveStart(){
++  const img = document.getElementById('live-img');
++  const msg = document.getElementById('live-msg');
++  _live.on = true; _live.n = 0; _live.t0 = performance.now();
++  document.getElementById('live-state').textContent = 'running';
++  const tick = () => {
++    if(!_live.on) return;
++    const t = performance.now();
++    img.onload = () => {
++      if(!_live.on) return;
++      img.style.display = 'inline-block'; msg.style.display = 'none';
++      document.getElementById('live-res').textContent = img.naturalWidth+'x'+img.naturalHeight;
++      _live.n++;
++      const dt = (performance.now() - _live.t0) / 1000;
++      if(dt > 1){ document.getElementById('live-rate').textContent = (_live.n/dt).toFixed(1)+' fps'; if(dt > 5){ _live.n = 0; _live.t0 = performance.now(); } }
++      const per = 1000 / Number(document.getElementById('live-fps').value);
++      _live.timer = setTimeout(tick, Math.max(0, per - (performance.now() - t)));
++    };
++    img.onerror = () => {
++      if(!_live.on) return;
++      msg.style.display = 'block';
++      msg.textContent = 'Snapshot unavailable (is snapshot.enabled true? check the daemon log). Retrying\u2026';
++      _live.timer = setTimeout(tick, 2000);
++    };
++    img.src = '/api/v1/snapshot.jpg?t=' + Date.now();
++  };
++  tick();
++}
++
++function liveStop(){
++  _live.on = false;
++  if(_live.timer){ clearTimeout(_live.timer); _live.timer = null; }
++  const st = document.getElementById('live-state');
++  if(st) st.textContent = 'stopped';
++}
++
++function liveRestart(){ if(_live.on){ liveStop(); liveStart(); } }
++
++function liveIdr(){
++  fetch('/request/idr').then(r => toast(r.ok ? 'Keyframe requested' : 'IDR request failed', r.ok))
++    .catch(e => toast('IDR request failed: '+e.message, false));
++}
++
+ /* ── Recordings Tab ── */
+ 
+ function recFmtBytes(n){
+@@ -1871,7 +1950,7 @@
+       // decided by applyIQCapability() from /api/v1/capabilities'
+       // data.routes.iq, not by backend name — a backend that gains or loses
+       // the surface then needs no edit here.
+-      if(backendName === 'cv610'){
++      if(backendName === 'cv610' || backendName === 'rv1106'){
+         // The listing works (it is a directory read), but nothing services a
+         // record request on cv610 — the routes answer 501. Keep the tab,
+         // disable the actuators so the buttons cannot lie.
