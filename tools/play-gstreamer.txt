@@ -1,0 +1,5 @@
+Lowest-latency alternative (install the GStreamer MSVC 64-bit runtime first):
+
+gst-launch-1.0 udpsrc port=5600 caps="application/x-rtp,media=video,encoding-name=H265,payload=97,clock-rate=90000" ! rtpjitterbuffer latency=0 ! rtph265depay ! h265parse ! d3d11h265dec ! d3d11videosink sync=false
+
+(if d3d11h265dec is not found, use avdec_h265)
